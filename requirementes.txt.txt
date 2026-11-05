@@ -1,6 +1,0 @@
-Plaintext
-
-streamlit
-requests
-pandas
-plotly.graph_objects
