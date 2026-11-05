@@ -4,7 +4,3 @@ streamlit
 requests
 pandas
 plotly
-
-
-API_USERNAME = "fernando.montenegro@hybricoenergy.com"
-API_PASSWORD = "Hybrico2026.10"
