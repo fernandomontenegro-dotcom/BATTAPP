@@ -330,18 +330,46 @@ def calcular_metricas_sitio(site_id, fecha_estudio):
             else df_telemetria["inverterLoadPower"].mean()
         )
     carga_promedio_kw_ajustada = carga_promedio_kw * 0.75
-    carga_promedio_85 = carga_promedio_kw * 0.85
+    carga_promedio_90 = carga_promedio_kw * 0.90
 
-    tiempo_respaldo_horas = 0.0
-    energia_nominal_wh = ah_banco * voltaje_banco
-    carga_promedio_watts = carga_promedio_kw_ajustada * 1000.0 if carga_promedio_kw_ajustada > 0 else 1.0
-    if carga_promedio_watts > 0 and ah_banco > 0:
-        tiempo_respaldo_horas = energia_nominal_wh / carga_promedio_watts
+    # ---------- TIEMPO DE RESPALDO Y FALLA BAT ----------
+    falla_bat = False
+    if ah_banco <= 0 or voltaje_banco <= 0:
+        falla_bat = True
+        tiempo_respaldo_horas = 0.0
+        dod_potencial_str = "(Falla Bat)"
+    else:
+        energia_nominal_wh = ah_banco * voltaje_banco
+        carga_promedio_watts = carga_promedio_kw_ajustada * 1000.0 if carga_promedio_kw_ajustada > 0 else 1.0
+        if carga_promedio_watts > 0:
+            tiempo_respaldo_horas = energia_nominal_wh / carga_promedio_watts
+        else:
+            tiempo_respaldo_horas = 0.0
+            
+        dod_potencial_str = "0%"
+        if tiempo_respaldo_horas > 0:
+            dod_val = 100 - (autonomia_excedente_horas / tiempo_respaldo_horas) * 100.0
+            dod_potencial_str = f"{round(dod_val, 1)}%"
 
-    # ---------- ENERGÍA: PRODUCCIÓN vs. EXCEDENTE ----------
+    # ---------- INFLECCIONES ----------
+    punto_inicio = None
+    punto_fin = None
+
+    if not df_telemetria.empty:
+        df_telemetria["diff"] = df_telemetria["solarPower"] - df_telemetria["inverterLoadPower"]
+        df_telemetria["prev_diff"] = df_telemetria["diff"].shift(1)
+
+        cruce_subida = df_telemetria[(df_telemetria["diff"] > 0) & (df_telemetria["prev_diff"] <= 0)]
+        if not cruce_subida.empty:
+            punto_inicio = cruce_subida.iloc[0]
+
+        cruce_bajada = df_telemetria[(df_telemetria["diff"] < 0) & (df_telemetria["prev_diff"] >= 0)]
+        if not cruce_bajada.empty:
+            punto_fin = cruce_bajada.iloc[-1]
+
+    # ---------- ENERGÍA: PRODUCCIÓN vs. EXCEDENTE (PUNTO 2: FACTOR 0.90) ----------
     produccion_solar_kwh = 0.0
     excedente_solar_kwh = 0.0
-    produccion_solar_horas = 0.0
 
     if not df_telemetria.empty and len(df_telemetria) > 1:
         df_sorted = (
@@ -365,99 +393,89 @@ def calcular_metricas_sitio(site_id, fecha_estudio):
             produccion_solar_kwh = max(0.0, float(prod_integral.sum()))
             excedente_solar_kwh = max(0.0, float(exce_integral.sum()))
 
-    if carga_promedio_kw > 0:
-        produccion_solar_horas = produccion_solar_kwh / carga_promedio_kw
-        autonomia_excedente_horas = excedente_solar_kwh / carga_promedio_85
+    if carga_promedio_90 > 0:
+        autonomia_excedente_horas = excedente_solar_kwh / carga_promedio_90
     else:
-        produccion_solar_horas = 0.0
         autonomia_excedente_horas = 0.0
+
+    # ---------- PRODUCCIÓN SOLAR HORAS (PUNTO 1: TIEMPO >= 95% ENTRE INFLEXIONES) ----------
+    produccion_solar_horas = 0.0
+    if punto_inicio is not None and punto_fin is not None:
+        dt_i = punto_inicio["dt_obj"]
+        dt_f = punto_fin["dt_obj"]
+        if dt_i and dt_f:
+            df_slice = df_telemetria[(df_telemetria["dt_obj"] >= dt_i) & (df_telemetria["dt_obj"] <= dt_f)].copy()
+            if len(df_slice) > 1:
+                df_slice = df_slice.sort_values("dt_obj").reset_index(drop=True)
+                dt_h_slice = df_slice["dt_obj"].diff().dt.total_seconds() / 3600.0
+                dt_h_slice = dt_h_slice.fillna(0)
+                is_valid = df_slice["solarPower"] >= (0.95 * df_slice["inverterLoadPower"])
+                produccion_solar_horas = float(dt_h_slice[is_valid].sum())
 
     autonomia_acumulada_horas = produccion_solar_horas + autonomia_excedente_horas
 
-    # ---------- DoD Potencial ----------
-    dod_potencial_str = "0%"
-    if tiempo_respaldo_horas > 0:
-        dod_val = 100 - (autonomia_excedente_horas / tiempo_respaldo_horas) * 100.0
-        dod_potencial_str = f"{round(dod_val, 1)}%"
-
-    # ---------- INFLECCIONES ----------
-    corte_am_str = "N/A"
+    # ---------- CORTE PM ----------
     corte_pm_str = "N/A"
-    punto_inicio = None
-    punto_fin = None
+    if punto_fin is not None:
+        soc_en_cruce = punto_fin["batteryStateOfCharge"]
+        dt_cruce_pm = punto_fin["dt_obj"]
+        if dt_cruce_pm:
+            dt_corte_pm = dt_cruce_pm
+            if soc_en_cruce < 90:
+                dt_corte_pm = dt_corte_pm - timedelta(minutes=30)
+            elif 90 <= soc_en_cruce <= 95:
+                dt_corte_pm = dt_corte_pm
+            else:
+                dt_corte_pm = dt_corte_pm + timedelta(minutes=30)
 
-    if not df_telemetria.empty:
-        df_telemetria["diff"] = df_telemetria["solarPower"] - df_telemetria["inverterLoadPower"]
-        df_telemetria["prev_diff"] = df_telemetria["diff"].shift(1)
+            dt_corte_pm_redondeado = redondear_a_media_hora(dt_corte_pm)
+            corte_pm_str = dt_corte_pm_redondeado.strftime("%H%M")
 
-        cruce_subida = df_telemetria[(df_telemetria["diff"] > 0) & (df_telemetria["prev_diff"] <= 0)]
-        if not cruce_subida.empty:
-            punto_inicio = cruce_subida.iloc[0]
+    # ---------- CORTE AM ----------
+    corte_am_str = "N/A"
+    if punto_inicio is not None:
+        dt_cruce_am = punto_inicio["dt_obj"]
+        if dt_cruce_am:
+            dt_corte_am = dt_cruce_am - timedelta(hours=autonomia_excedente_horas)
+            dt_corte_am_inferior = redondear_a_media_hora_inferior(dt_corte_am)
 
-        cruce_bajada = df_telemetria[(df_telemetria["diff"] < 0) & (df_telemetria["prev_diff"] >= 0)]
-        if not cruce_bajada.empty:
-            punto_fin = cruce_bajada.iloc[-1]
+            soc_ajuste = None
+            if punto_fin is not None:
+                soc_ajuste = punto_fin["batteryStateOfCharge"]
+            elif not df_telemetria.empty:
+                soc_ajuste = df_telemetria["batteryStateOfCharge"].max()
 
-        # Corte PM
-        if punto_fin is not None:
-            soc_en_cruce = punto_fin["batteryStateOfCharge"]
-            dt_cruce_pm = punto_fin["dt_obj"]
-            if dt_cruce_pm:
-                dt_corte_pm = dt_cruce_pm
-                if soc_en_cruce < 90:
-                    dt_corte_pm = dt_corte_pm - timedelta(minutes=30)
-                elif 90 <= soc_en_cruce <= 95:
-                    dt_corte_pm = dt_corte_pm
-                else:
-                    dt_corte_pm = dt_corte_pm + timedelta(minutes=30)
-
-                dt_corte_pm_redondeado = redondear_a_media_hora(dt_corte_pm)
-                corte_pm_str = dt_corte_pm_redondeado.strftime("%H%M")
-
-        # Corte AM (Regla base de rangos de SOC)
-        if punto_inicio is not None:
-            dt_cruce_am = punto_inicio["dt_obj"]
-            if dt_cruce_am:
-                dt_corte_am = dt_cruce_am - timedelta(hours=autonomia_excedente_horas)
-                dt_corte_am_inferior = redondear_a_media_hora_inferior(dt_corte_am)
-
-                soc_ajuste = None
-                if punto_fin is not None:
-                    soc_ajuste = punto_fin["batteryStateOfCharge"]
-                elif not df_telemetria.empty:
-                    soc_ajuste = df_telemetria["batteryStateOfCharge"].max()
-
-                if soc_ajuste is not None:
-                    if soc_ajuste < 80:
-                        dt_corte_am_inferior += timedelta(hours=1)
-                    elif soc_ajuste < 90:
-                        dt_corte_am_inferior += timedelta(minutes=30)
-                    elif soc_ajuste <= 97:
-                        pass
-                    else:
-                        dt_corte_am_inferior -= timedelta(minutes=30)
-
-                corte_am_str = dt_corte_am_inferior.strftime("%H%M")
-
-    # --- REGLA ADICIONAL: Reducción de Corte AM si SOC llega a 100% antes de las 13:00 ---
-    if not df_telemetria.empty and corte_am_str not in ("N/A", "0000"):
-        df_full = df_telemetria[df_telemetria["batteryStateOfCharge"] >= 99.5]
-        if not df_full.empty:
-            first_full_dt = df_full.iloc[0]["dt_obj"]
-            if first_full_dt is not None and first_full_dt.hour < 13:
-                try:
-                    dt_ca = datetime.strptime(corte_am_str, "%H%M")
-                    dt_ca -= timedelta(hours=1) # Restar 1 hora
-                    corte_am_str = dt_ca.strftime("%H%M")
-                except Exception:
+            if soc_ajuste is not None:
+                if soc_ajuste < 80:
+                    dt_corte_am_inferior += timedelta(hours=1)
+                elif soc_ajuste < 90:
+                    dt_corte_am_inferior += timedelta(minutes=30)
+                elif soc_ajuste <= 97:
                     pass
+                else:
+                    dt_corte_am_inferior -= timedelta(minutes=30)
+
+            corte_am_str = dt_corte_am_inferior.strftime("%H%M")
+
+            # REGLA ESPECIAL: Reducción de 1 hora si SOC llega a 100% antes de las 13:00
+            if not df_telemetria.empty and corte_am_str not in ("N/A", "0000"):
+                df_full = df_telemetria[df_telemetria["batteryStateOfCharge"] >= 99.5]
+                if not df_full.empty:
+                    first_full_dt = df_full.iloc[0]["dt_obj"]
+                    if first_full_dt is not None and first_full_dt.hour < 13:
+                        try:
+                            dt_ca = datetime.strptime(corte_am_str, "%H%M")
+                            dt_ca -= timedelta(hours=1)
+                            corte_am_str = dt_ca.strftime("%H%M")
+                        except Exception:
+                            pass
 
     return {
-        "Ah": ah_banco,
-        "Voltage": voltaje_banco,
+        "Ah": round(ah_banco, 1) if not falla_bat else "(Falla Bat)",
+        "Voltage": round(voltaje_banco, 1) if not falla_bat else "(Falla Bat)",
         "Carga Promedio (kW)": round(carga_promedio_kw, 3),
-        "Carga Prom 0.85 (kW)": round(carga_promedio_85, 3),
-        "Horas de Autonomía": round(tiempo_respaldo_horas, 2),
+        "Carga Prom 0.90 (kW)": round(carga_promedio_90, 3),
+        "Horas de Autonomía": round(tiempo_respaldo_horas, 2) if not falla_bat else "(Falla Bat)",
         "Excedente Solar (kWh)": round(excedente_solar_kwh, 2),
         "Producción Solar (kWh)": round(produccion_solar_kwh, 2),
         "Producción Solar (Horas)": round(produccion_solar_horas, 2),
@@ -574,11 +592,11 @@ with tab_ind:
                 st.markdown("### ☀️ Aprovechamiento Energético")
                 a1, a2, a3, a4, a5 = st.columns(5)
                 a1.metric(
-                    label="Producción Solar (h equiv)",
+                    label="Producción Solar (h efectivas)",
                     value=f"{res_ind['Producción Solar (Horas)']} Horas",
-                    delta=f"{res_ind['Producción Solar (kWh)']} kWh / carga"
+                    delta="Tiempo >=95% de carga entre inflexiones"
                 )
-                a2.metric(label="Autonomía Excedente", value=f"{res_ind['Autonomía Excedente (Horas)']} Horas", delta="Excedente / (carga × 0.85)")
+                a2.metric(label="Autonomía Excedente", value=f"{res_ind['Autonomía Excedente (Horas)']} Horas", delta="Excedente / (carga × 0.90)")
                 a3.metric(label="Tiempo de Respaldo", value=f"{res_ind['Horas de Autonomía']} Horas", delta="Autonomía Batería")
                 a4.metric(label="Autonomía Acumulada", value=f"{res_ind['Autonomía Acumulada (Horas)']} Horas", delta="Producción + Excedente")
                 a5.metric(label="DoD% Potencial", value=res_ind["DoD Potencial"], delta="Descarga objetivo")
@@ -705,7 +723,7 @@ with tab_lote:
                                 "ANOMALÍA": anomalia,
                                 "Producción Solar (h)": res["Producción Solar (Horas)"],
                                 "Autonomía Excedente (h)": res["Autonomía Excedente (Horas)"],
-                                "Carga Prom 0.85 (kW)": res.get("Carga Prom 0.85 (kW)", 0.0),
+                                "Carga Prom 0.90 (kW)": res.get("Carga Prom 0.90 (kW)", 0.0),
                                 "DoD Potencial": res["DoD Potencial"],
                                 "Excedente Solar (kWh)": res["Excedente Solar (kWh)"],
                                 "Corte AM": corte_am,
@@ -754,7 +772,7 @@ with tab_lote:
             df_cuest["_sort_anomaly"] = df_cuest["ANOMALÍA"].apply(get_anomaly_priority)
             df_cuest = df_cuest.sort_values(by=["_sort_anomaly", "SITIO_ID"]).drop(columns=["_sort_anomaly"])
 
-        # --- CICLO REGULAR (Ordenado por prioridad, ej. "Mala producción" al final) ---
+        # --- CICLO REGULAR (Ordenado por prioridad) ---
         df_reg = df_lote_final[df_lote_final["CLASIFICACIÓN"] == "Ciclo Regular"].copy()
         if not df_reg.empty:
             df_reg["_sort_anomaly"] = df_reg["ANOMALÍA"].apply(get_anomaly_priority)
