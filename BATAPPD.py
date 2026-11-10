@@ -310,7 +310,6 @@ def procesar_respuesta_ts(data_json):
 
 
 def calcular_metricas_dia(site_id, fecha_estudio):
-    """Calcula las métricas para un solo día específico."""
     tz_cst = timezone(timedelta(hours=-6))
     dt_inicio_cst = datetime(
         fecha_estudio.year, fecha_estudio.month, fecha_estudio.day,
@@ -483,105 +482,7 @@ def calcular_metricas_dia(site_id, fecha_estudio):
     }
 
 
-def calcular_metricas_3dias(site_id):
-    """Extrae los datos de los 3 días previos y calcula un promedio de los resultados."""
-    hoy = date.today()
-    dias = [hoy - timedelta(days=1), hoy - timedelta(days=2), hoy - timedelta(days=3)]
-    
-    resultados_dias = []
-    dfs = []
-    
-    for d in dias:
-        try:
-            res = calcular_metricas_dia(site_id, d)
-            if res and not res["df"].empty:
-                resultados_dias.append(res)
-                dfs.append(res["df"])
-        except Exception:
-            pass
-            
-    if not resultados_dias:
-        return None
-
-    # Unir DataFrames para la gráfica (línea de tiempo de 3 días)
-    df_completo = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-    if not df_completo.empty:
-        df_completo = df_completo.sort_values("dt_obj").reset_index(drop=True)
-
-    # Promediar valores numéricos
-    def avg_num(key):
-        vals = [r[key] for r in resultados_dias if isinstance(r[key], (int, float))]
-        return sum(vals) / len(vals) if vals else 0.0
-        
-    # Falla Bat
-    fallas_bat = sum(1 for r in resultados_dias if r["DoD Potencial"] == "(Falla Bat)")
-    if fallas_bat == len(resultados_dias):
-        ah_prom = "(Falla Bat)"
-        voltaje_prom = "(Falla Bat)"
-        horas_respaldo_prom = "(Falla Bat)"
-        dod_prom = "(Falla Bat)"
-    else:
-        ah_validos = [r["Ah"] for r in resultados_dias if isinstance(r["Ah"], (int, float))]
-        ah_prom = round(sum(ah_validos) / len(ah_validos), 1) if ah_validos else 0.0
-        
-        voltaje_validos = [r["Voltage"] for r in resultados_dias if isinstance(r["Voltage"], (int, float))]
-        voltaje_prom = round(sum(voltaje_validos) / len(voltaje_validos), 1) if voltaje_validos else 0.0
-        
-        horas_respaldo_prom = round(avg_num("Horas de Autonomía"), 2)
-        auto_exc_prom = avg_num("Autonomía Excedente (Horas)")
-        
-        if horas_respaldo_prom > 0:
-            dod_val = 100 - (auto_exc_prom / horas_respaldo_prom) * 100.0
-            dod_prom = f"{round(dod_val, 1)}%"
-        else:
-            dod_prom = "0%"
-
-    # Promediar tiempos (Cortes)
-    def avg_time(key):
-        tiempos = [r[key] for r in resultados_dias if isinstance(r[key], str) and len(r[key]) == 4 and r[key] not in ("N/A", "0000")]
-        if not tiempos:
-            return "N/A"
-        minutos = []
-        for t in tiempos:
-            try:
-                minutos.append(int(t[:2]) * 60 + int(t[2:]))
-            except:
-                pass
-        if not minutos:
-            return "N/A"
-        prom_min = sum(minutos) / len(minutos)
-        # Redondear al bloque de 30 min más cercano
-        prom_min = round(prom_min / 30) * 30
-        h_res = (prom_min // 60) % 24
-        m_res = prom_min % 60
-        return f"{h_res:02d}{m_res:02d}"
-
-    # Usar los puntos de inflexión del día más reciente para el gráfico
-    ultimo_res = resultados_dias[-1]
-
-    return {
-        "Ah": ah_prom,
-        "Voltage": voltaje_prom,
-        "Carga Promedio (kW)": round(avg_num("Carga Promedio (kW)"), 3),
-        "Carga Prom 0.90 (kW)": round(avg_num("Carga Prom 0.90 (kW)"), 3),
-        "Horas de Autonomía": horas_respaldo_prom,
-        "Excedente Solar (kWh)": round(avg_num("Excedente Solar (kWh)"), 2),
-        "Producción Solar (kWh)": round(avg_num("Producción Solar (kWh)"), 2),
-        "Producción Solar (Horas)": round(avg_num("Producción Solar (Horas)"), 2),
-        "Autonomía Excedente (Horas)": round(avg_num("Autonomía Excedente (Horas)"), 2),
-        "Autonomía Acumulada (Horas)": round(avg_num("Autonomía Acumulada (Horas)"), 2),
-        "DoD Potencial": dod_prom,
-        "Corte AM": avg_time("Corte AM"),
-        "Corte PM": avg_time("Corte PM"),
-        "df": df_completo,
-        "punto_inicio": ultimo_res["punto_inicio"],
-        "punto_fin": ultimo_res["punto_fin"],
-        "carga_promedio_kw": avg_num("Carga Promedio (kW)"),
-    }
-
-
 def clasificar_sitio(res):
-    """Clasificación basada en el historial de 3 días."""
     df_t = res["df"]
     corte_am = res.get("Corte AM", "N/A")
     corte_pm = res.get("Corte PM", "N/A")
@@ -642,7 +543,7 @@ tab_ind, tab_lote = st.tabs(["📊 Sitio Individual", "📁 Consulta por Lote (R
 # ==========================================
 with tab_ind:
     site_id_ind = st.text_input("ID del Sitio (Individual):", value="hyb_aguacatan_-_hht780")
-    st.info("📅 **Nota:** El análisis se calcula automáticamente tomando los **3 días previos** al día de hoy.")
+    st.info("📅 **Nota:** El análisis se calcula automáticamente usando los datos del **día de ayer**.")
 
     if st.button("🚀 Ejecutar Diagnóstico Individual", type="primary", use_container_width=True):
         if not autenticar():
@@ -664,52 +565,52 @@ with tab_ind:
                     "Solo se analizan sitios en estado **Normal** o **Normal (Sin Medidor)**."
                 )
             else:
-                st.success(f"✅ Estado del sitio: **{estado_ind}**. Extrayendo historial de 3 días...")
-                with st.spinner("Consultando datos históricos y calculando promedios..."):
-                    res_ind = calcular_metricas_3dias(site_id_ind.strip())
+                st.success(f"✅ Estado del sitio: **{estado_ind}**. Extrayendo historial de ayer...")
+                with st.spinner("Consultando datos y calculando parámetros del día previo..."):
+                    fecha_ayer = date.today() - timedelta(days=1)
+                    res_ind = calcular_metricas_dia(site_id_ind.strip(), fecha_ayer)
 
-                if not res_ind or res_ind["df"].empty:
-                    st.warning("⚠️ No se encontraron registros en los 3 días previos para este sitio.")
+                if res_ind["df"].empty:
+                    st.warning("⚠️ No se encontraron registros para el día de ayer en este sitio.")
                 else:
-                    st.markdown("### 🔋 Parámetros Extraídos y Autonomía Nominal (Promedio 3 Días)")
+                    st.markdown(f"### 🔋 Parámetros Extraídos y Autonomía Nominal (Día: {fecha_ayer.strftime('%d/%m/%Y')})")
                     m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric(label="Capacidad Promedio", value=f"{res_ind['Ah']} Ah", delta="batteryBankCapacity")
-                    m2.metric(label="Voltaje Promedio", value=f"{res_ind['Voltage']} V", delta="batteryBankVoltage")
-                    m3.metric(label="Inverter Load Promedio", value=f"{res_ind['Carga Promedio (kW)']} kW", delta="Promedio 3 días")
+                    m1.metric(label="Capacidad Extraída", value=f"{res_ind['Ah']} Ah", delta="batteryBankCapacity")
+                    m2.metric(label="Voltaje Extraído", value=f"{res_ind['Voltage']} V", delta="batteryBankVoltage")
+                    m3.metric(label="Inverter Load Promedio", value=f"{res_ind['Carga Promedio (kW)']} kW", delta="Promedio 24h")
                     m4.metric(label="Tiempo de Respaldo (75%)", value=f"{res_ind['Horas de Autonomía']} Horas", delta="Autonomía Batería")
-                    m5.metric(label="Excedente Solar", value=f"{res_ind['Excedente Solar (kWh)']} kWh", delta="Prom. diario ∫ max(solar−carga,0)")
+                    m5.metric(label="Excedente Solar", value=f"{res_ind['Excedente Solar (kWh)']} kWh", delta="∫ max(solar−carga,0)")
 
                     st.markdown("### ☀️ Aprovechamiento Energético")
                     a1, a2, a3, a4, a5 = st.columns(5)
                     a1.metric(
                         label="Producción Solar (h efectivas)",
                         value=f"{res_ind['Producción Solar (Horas)']} Horas",
-                        delta="Prom. tiempo >=95% carga entre inflexiones"
+                        delta="Tiempo >=95% de carga entre inflexiones"
                     )
                     a2.metric(label="Autonomía Excedente", value=f"{res_ind['Autonomía Excedente (Horas)']} Horas", delta="Excedente / (carga × 0.90)")
                     a3.metric(label="Tiempo de Respaldo", value=f"{res_ind['Horas de Autonomía']} Horas", delta="Autonomía Batería")
                     a4.metric(label="Autonomía Acumulada", value=f"{res_ind['Autonomía Acumulada (Horas)']} Horas", delta="Producción + Excedente")
                     a5.metric(label="DoD% Potencial", value=res_ind["DoD Potencial"], delta="Descarga objetivo")
 
-                    st.markdown("### ⏰ Horarios de Corte Operativo (Promedio 3 Días)")
+                    st.markdown("### ⏰ Horarios de Corte Operativo")
                     c_col1, c_col2 = st.columns(2)
-                    c_col1.metric(label="CORTE AM", value=res_ind["Corte AM"], delta="Promedio ajustado por SOC")
-                    c_col2.metric(label="CORTE PM", value=res_ind["Corte PM"], delta="Promedio ajustado por rangos")
+                    c_col1.metric(label="CORTE AM", value=res_ind["Corte AM"], delta="Ajustado por SOC")
+                    c_col2.metric(label="CORTE PM", value=res_ind["Corte PM"], delta="Ajuste por rangos de SOC")
 
                     df_t = res_ind["df"]
                     st.markdown("---")
-                    st.markdown("### 📊 Gráfica Comparativa: Solar vs Carga (Historial 3 Días)")
+                    st.markdown("### 📊 Gráfica Comparativa: Solar vs Carga (Con Puntos de Inflexión)")
 
                     fig_cruce = go.Figure()
                     fig_cruce.add_trace(go.Scatter(x=df_t["Hora Local (CST)"], y=df_t["solarPower"], name="Solar Power (kW)", line=dict(color="#FFC107", width=2.5)))
                     fig_cruce.add_trace(go.Scatter(x=df_t["Hora Local (CST)"], y=df_t["inverterLoadPower"], name="Inverter Load Power (kW)", line=dict(color="#FF5722", width=2.5)))
 
-                    # Se muestran los puntos de inflexión del día más reciente analizado
                     if res_ind["punto_inicio"] is not None:
                         p_ini = res_ind["punto_inicio"]
                         fig_cruce.add_trace(go.Scatter(
                             x=[p_ini["Hora Local (CST)"]], y=[p_ini["solarPower"]],
-                            mode="markers+text", name="Cruce Ascendente (Último día)",
+                            mode="markers+text", name="Cruce Ascendente",
                             text=[f"🌅 Inicio: {p_ini['Hora Local (CST)'][-8:]}"], textposition="top center",
                             marker=dict(color="#00E676", size=14, symbol="triangle-up")
                         ))
@@ -718,12 +619,12 @@ with tab_ind:
                         p_fin = res_ind["punto_fin"]
                         fig_cruce.add_trace(go.Scatter(
                             x=[p_fin["Hora Local (CST)"]], y=[p_fin["solarPower"]],
-                            mode="markers+text", name="Cruce Descendente (Último día)",
+                            mode="markers+text", name="Cruce Descendente",
                             text=[f"🌇 Fin: {p_fin['Hora Local (CST)'][-8:]} (SOC: {p_fin['batteryStateOfCharge']}%)"], textposition="top center",
                             marker=dict(color="#FF1744", size=14, symbol="triangle-down")
                         ))
 
-                    fig_cruce.update_layout(title="<b>Historial de Generación vs Carga</b>", xaxis_title="Hora Local (CST)", yaxis_title="Potencia (kW)", template="plotly_dark", height=450, hovermode="x unified")
+                    fig_cruce.update_layout(title="<b>Puntos de Inflexión: Generación Solar vs Carga del Inversor</b>", xaxis_title="Hora Local (CST)", yaxis_title="Potencia (kW)", template="plotly_dark", height=450, hovermode="x unified")
                     st.plotly_chart(fig_cruce, use_container_width=True)
 
                     st.markdown("---")
@@ -734,6 +635,10 @@ with tab_ind:
                         fig.update_layout(title=f"<b>{titulo}</b>", xaxis_title="Hora Local (CST)", yaxis_title="Valor", template="plotly_dark", height=350, hovermode="x unified")
                         st.plotly_chart(fig, use_container_width=True)
 
+                    st.markdown("---")
+                    st.markdown("### 📋 Tabla de Muestreo (Granularidad de 15 minutos)")
+                    st.dataframe(df_t.drop(columns=["diff", "prev_diff", "dt_obj"], errors="ignore"), use_container_width=True)
+
 
 # ==========================================
 # PESTAÑA 2: MODO LOTES
@@ -743,11 +648,11 @@ with tab_lote:
     st.markdown(
         "Carga automáticamente todos los sitios de la organización seleccionada, "
         "filtra **solo** los sitios en estado **Normal** o **Normal (Sin Medidor)** "
-        "y los clasifica automáticamente analizando el comportamiento de los **3 días previos**."
+        "y los clasifica automáticamente analizando el comportamiento del **día de ayer**."
     )
 
     region_lote = st.selectbox("Selecciona la Región/Organización:", ["Tigo GT", "Honduras"])
-    st.info("📅 **Nota:** Los cálculos usarán automáticamente el historial de los **3 días previos** al día de hoy.")
+    st.info("📅 **Nota:** Los cálculos usarán automáticamente los datos del **día de ayer**.")
 
     if st.button("🚀 Cargar Topología y Procesar Lote por Región", type="primary", use_container_width=True):
         if not autenticar():
@@ -774,12 +679,13 @@ with tab_lote:
             if not sitios_candidatos:
                 st.warning(f"⚠️ No se encontraron sitios para la región seleccionada: {region_lote}")
             else:
-                st.info(f"🔍 Topología cargada: {len(sitios_candidatos)} sitios. Filtrando por estado y clasificando (3 días)...")
+                st.info(f"🔍 Topología cargada: {len(sitios_candidatos)} sitios. Filtrando por estado y clasificando (Día de ayer)...")
 
                 ahora_utc = datetime.now(timezone.utc)
                 hace_horas = ahora_utc - timedelta(hours=4)
                 end_sec = int(ahora_utc.timestamp())
                 start_sec = int(hace_horas.timestamp())
+                fecha_ayer = date.today() - timedelta(days=1)
 
                 resultados_lote = []
                 barra_progreso = st.progress(0)
@@ -793,8 +699,8 @@ with tab_lote:
 
                     if estado_sitio in ("Normal", "Normal (Sin Medidor)"):
                         try:
-                            res = calcular_metricas_3dias(s_id)
-                            if res:
+                            res = calcular_metricas_dia(s_id, fecha_ayer)
+                            if not res["df"].empty:
                                 clasif, anomalia, corte_am, corte_pm = clasificar_sitio(res)
 
                                 resultados_lote.append({
@@ -820,7 +726,7 @@ with tab_lote:
                     df_lote_final = pd.DataFrame(resultados_lote)
                     st.success(
                         f"✅ Procesamiento completado. {len(df_lote_final)} sitios en estado Normal "
-                        "fueron clasificados usando el historial de 3 días."
+                        "fueron clasificados usando el día de ayer."
                     )
                     st.session_state["df_lote_final"] = df_lote_final
                     st.session_state["region_lote"] = region_lote
@@ -833,7 +739,7 @@ with tab_lote:
     if "df_lote_final" in st.session_state and not st.session_state["df_lote_final"].empty:
         df_lote_final = st.session_state["df_lote_final"]
         region_lote = st.session_state["region_lote"]
-        hoy_str = date.today().strftime('%Y%m%d')
+        ayer_str = (date.today() - timedelta(days=1)).strftime('%Y%m%d')
 
         def get_anomaly_priority(anomaly):
             anomaly = str(anomaly)
@@ -855,7 +761,7 @@ with tab_lote:
             df_reg["_sort_anomaly"] = df_reg["ANOMALÍA"].apply(get_anomaly_priority)
             df_reg = df_reg.sort_values(by=["_sort_anomaly", "SITIO_ID"]).drop(columns=["_sort_anomaly"])
 
-        st.markdown("### 📊 Resumen General de Lotes (3 Días Previos)")
+        st.markdown("### 📊 Resumen General de Lotes (Día de Ayer)")
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("🔴 Conexión Permanente", len(df_perm))
         col_m2.metric("🟡 Cuestionable o Saturado", len(df_cuest))
@@ -870,7 +776,7 @@ with tab_lote:
             st.download_button(
                 label="📥 Descargar CSV: Conexión Permanente",
                 data=csv_perm,
-                file_name=f"lote_{region_lote.lower()}_conexion_permanente_{hoy_str}.csv",
+                file_name=f"lote_{region_lote.lower()}_conexion_permanente_{ayer_str}.csv",
                 mime="text/csv",
                 use_container_width=True,
                 key="dl_perm",
@@ -887,7 +793,7 @@ with tab_lote:
             st.download_button(
                 label="📥 Descargar CSV: Cuestionable o Saturado",
                 data=csv_cuest,
-                file_name=f"lote_{region_lote.lower()}_cuestionable_{hoy_str}.csv",
+                file_name=f"lote_{region_lote.lower()}_cuestionable_{ayer_str}.csv",
                 mime="text/csv",
                 use_container_width=True,
                 key="dl_cuest",
@@ -904,7 +810,7 @@ with tab_lote:
             st.download_button(
                 label="📥 Descargar CSV: Ciclo Regular",
                 data=csv_reg,
-                file_name=f"lote_{region_lote.lower()}_ciclo_regular_{hoy_str}.csv",
+                file_name=f"lote_{region_lote.lower()}_ciclo_regular_{ayer_str}.csv",
                 mime="text/csv",
                 use_container_width=True,
                 key="dl_reg",
