@@ -89,8 +89,8 @@ def enviar_parametros_lote(datos_a_enviar):
       params_payload = {
           "params": {
               inv_id: {
-                  "inverterChargeStartTime2": corte_am,
-                  "inverterChargeEndTime2": corte_pm,
+                  "inverterChargeEndTime2": corte_am,
+                  "inverterChargeStartTime2": corte_pm,
               }
           }
       }
