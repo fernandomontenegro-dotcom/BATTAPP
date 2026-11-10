@@ -239,7 +239,8 @@ def consultar_series_temporales(site_id, start_dt, end_dt):
     start_sec = int(start_dt.timestamp())
     end_sec = int(end_dt.timestamp())
 
-    params_str = "solarPower,batteryStateOfCharge,inverterLoadPower,gridPower"
+    # --- SE AÑADE gridVoltageLLMean A LA CONSULTA ---
+    params_str = "solarPower,batteryStateOfCharge,inverterLoadPower,gridPower,gridVoltageLLMean"
     url = f"https://api.stellar.newsunroad.com/api/v0/ts/{site_id}?end={end_sec}&start={start_sec}&params={params_str}"
 
     try:
@@ -291,7 +292,8 @@ def procesar_respuesta_ts(data_json):
                     fila["Hora Local (CST)"] = hora_local_str
                     fila["dt_obj"] = dt_local_obj
 
-                    for param in ["solarPower", "batteryStateOfCharge", "inverterLoadPower", "gridPower"]:
+                    # --- SE AÑADE gridVoltageLLMean AL PARSEO ---
+                    for param in ["solarPower", "batteryStateOfCharge", "inverterLoadPower", "gridPower", "gridVoltageLLMean"]:
                         val = ts.get(param)
                         try:
                             fila[param] = float(val) if val is not None else 0.0
@@ -320,6 +322,24 @@ def calcular_metricas_dia(site_id, fecha_estudio):
     ah_banco, voltaje_banco = extraer_datos_banco_exacto(site_id, dt_inicio_cst, dt_fin_cst)
     raw_data, _ = consultar_series_temporales(site_id, dt_inicio_cst, dt_fin_cst)
     df_telemetria = procesar_respuesta_ts(raw_data)
+
+    # --- NUEVO FILTRO: PRESENCIA DE RED (gridVoltageLLMean) >= 75% ---
+    if not df_telemetria.empty and "gridVoltageLLMean" in df_telemetria.columns:
+        df_sorted = df_telemetria.dropna(subset=["dt_obj"]).sort_values("dt_obj").reset_index(drop=True)
+        if len(df_sorted) > 1:
+            dt_h = df_sorted["dt_obj"].diff().dt.total_seconds() / 3600.0
+            dt_h = dt_h.fillna(0)
+            
+            # Se asume presencia de red si el voltaje L-L es mayor a 50V
+            tiempo_con_red = dt_h[df_sorted["gridVoltageLLMean"] > 50.0].sum()
+            
+            # 75% de 24 horas = 18 horas
+            if tiempo_con_red < 18.0:
+                return {
+                    "df": df_telemetria,
+                    "FALLA_RED": True,
+                    "Tiempo Red (h)": round(tiempo_con_red, 2)
+                }
 
     # ---------- CARGA PROMEDIO ----------
     carga_promedio_kw = 0.0
@@ -462,6 +482,8 @@ def calcular_metricas_dia(site_id, fecha_estudio):
         dod_potencial_str = f"{round(dod_val, 1)}%"
 
     return {
+        "FALLA_RED": False,
+        "Tiempo Red (h)": 24.0, # Si pasó el filtro, no importa el valor exacto
         "Ah": round(ah_banco, 1) if not falla_bat else "(Falla Bat)",
         "Voltage": round(voltaje_banco, 1) if not falla_bat else "(Falla Bat)",
         "Carga Promedio (kW)": round(carga_promedio_kw, 3),
@@ -543,13 +565,13 @@ tab_ind, tab_lote = st.tabs(["📊 Sitio Individual", "📁 Consulta por Lote (R
 # ==========================================
 with tab_ind:
     site_id_ind = st.text_input("ID del Sitio (Individual):", value="hyb_aguacatan_-_hht780")
-    st.info("📅 **Nota:** El análisis se calcula automáticamente usando los datos del **día de ayer**.")
+    st.info("📅 **Nota:** El análisis se calcula usando los datos del **día de ayer**. Se requiere ≥75% del día con presencia de Red.")
 
     if st.button("🚀 Ejecutar Diagnóstico Individual", type="primary", use_container_width=True):
         if not autenticar():
             st.error("❌ Falló la autenticación con la API de Stellar.")
         else:
-            with st.spinner("Verificando estado operativo del sitio..."):
+            with st.spinner("Verificando estado operativo y presencia de red..."):
                 ahora_utc = datetime.now(timezone.utc)
                 hace_horas = ahora_utc - timedelta(hours=4)
                 estado_ind = evaluar_estado_sitio(
@@ -565,14 +587,23 @@ with tab_ind:
                     "Solo se analizan sitios en estado **Normal** o **Normal (Sin Medidor)**."
                 )
             else:
-                st.success(f"✅ Estado del sitio: **{estado_ind}**. Extrayendo historial de ayer...")
+                fecha_ayer = date.today() - timedelta(days=1)
                 with st.spinner("Consultando datos y calculando parámetros del día previo..."):
-                    fecha_ayer = date.today() - timedelta(days=1)
                     res_ind = calcular_metricas_dia(site_id_ind.strip(), fecha_ayer)
 
-                if res_ind["df"].empty:
+                # --- VALIDACIÓN DE RED ---
+                if res_ind.get("FALLA_RED", False):
+                    tiempo_red = res_ind.get("Tiempo Red (h)", 0.0)
+                    st.error(
+                        f"❌ **Filtro de Red Reprobado:** El sitio solo tuvo presencia de red "
+                        f"(gridVoltageLLMean > 50V) durante **{tiempo_red} horas** el día de ayer. "
+                        "Se requiere al menos el 75% (18 horas) para considerarse operativo en red."
+                    )
+                elif res_ind["df"].empty:
                     st.warning("⚠️ No se encontraron registros para el día de ayer en este sitio.")
                 else:
+                    st.success(f"✅ Estado: **{estado_ind}** | Red: **Suficiente**. Extrayendo datos del {fecha_ayer.strftime('%d/%m/%Y')}...")
+                    
                     st.markdown(f"### 🔋 Parámetros Extraídos y Autonomía Nominal (Día: {fecha_ayer.strftime('%d/%m/%Y')})")
                     m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric(label="Capacidad Extraída", value=f"{res_ind['Ah']} Ah", delta="batteryBankCapacity")
@@ -647,12 +678,12 @@ with tab_lote:
     st.markdown("### 📁 Consulta por Lote (Carga Masiva por Región HN y GT)")
     st.markdown(
         "Carga automáticamente todos los sitios de la organización seleccionada, "
-        "filtra **solo** los sitios en estado **Normal** o **Normal (Sin Medidor)** "
+        "filtra **solo** los sitios en estado **Normal** o **Normal (Sin Medidor)** con **presencia de red >75%** "
         "y los clasifica automáticamente analizando el comportamiento del **día de ayer**."
     )
 
     region_lote = st.selectbox("Selecciona la Región/Organización:", ["Tigo GT", "Honduras"])
-    st.info("📅 **Nota:** Los cálculos usarán automáticamente los datos del **día de ayer**.")
+    st.info("📅 **Nota:** Los cálculos usarán el día de ayer. Los sitios con Falla de Red (<18h) serán omitidos de las tablas.")
 
     if st.button("🚀 Cargar Topología y Procesar Lote por Región", type="primary", use_container_width=True):
         if not autenticar():
@@ -679,7 +710,7 @@ with tab_lote:
             if not sitios_candidatos:
                 st.warning(f"⚠️ No se encontraron sitios para la región seleccionada: {region_lote}")
             else:
-                st.info(f"🔍 Topología cargada: {len(sitios_candidatos)} sitios. Filtrando por estado y clasificando (Día de ayer)...")
+                st.info(f"🔍 Topología cargada: {len(sitios_candidatos)} sitios. Filtrando estado, red y clasificando...")
 
                 ahora_utc = datetime.now(timezone.utc)
                 hace_horas = ahora_utc - timedelta(hours=4)
@@ -700,7 +731,11 @@ with tab_lote:
                     if estado_sitio in ("Normal", "Normal (Sin Medidor)"):
                         try:
                             res = calcular_metricas_dia(s_id, fecha_ayer)
-                            if not res["df"].empty:
+                            
+                            # Si falla el filtro de red, se ignora por completo
+                            if res.get("FALLA_RED", False):
+                                pass 
+                            elif not res["df"].empty:
                                 clasif, anomalia, corte_am, corte_pm = clasificar_sitio(res)
 
                                 resultados_lote.append({
@@ -725,13 +760,13 @@ with tab_lote:
                 if resultados_lote:
                     df_lote_final = pd.DataFrame(resultados_lote)
                     st.success(
-                        f"✅ Procesamiento completado. {len(df_lote_final)} sitios en estado Normal "
+                        f"✅ Procesamiento completado. {len(df_lote_final)} sitios en estado Normal y con Red válida "
                         "fueron clasificados usando el día de ayer."
                     )
                     st.session_state["df_lote_final"] = df_lote_final
                     st.session_state["region_lote"] = region_lote
                 else:
-                    st.warning("⚠️ No se encontraron sitios en estado Normal para esta región.")
+                    st.warning("⚠️ No se encontraron sitios válidos (Normal + Red >75%) para esta región.")
                     if "df_lote_final" in st.session_state:
                         del st.session_state["df_lote_final"]
 
@@ -761,7 +796,7 @@ with tab_lote:
             df_reg["_sort_anomaly"] = df_reg["ANOMALÍA"].apply(get_anomaly_priority)
             df_reg = df_reg.sort_values(by=["_sort_anomaly", "SITIO_ID"]).drop(columns=["_sort_anomaly"])
 
-        st.markdown("### 📊 Resumen General de Lotes (Día de Ayer)")
+        st.markdown("### 📊 Resumen General de Lotes (Día de Ayer + Filtro Red)")
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("🔴 Conexión Permanente", len(df_perm))
         col_m2.metric("🟡 Cuestionable o Saturado", len(df_cuest))
