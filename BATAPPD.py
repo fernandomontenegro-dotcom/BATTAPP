@@ -416,7 +416,7 @@ def calcular_metricas_dia(site_id, fecha_estudio):
                 is_valid = df_slice["solarPower"] >= (0.95 * df_slice["inverterLoadPower"])
                 produccion_solar_horas = float(dt_h_slice[is_valid].sum())
 
-    autonomia_acumulada_horas = 0.8*( produccion_solar_horas + autonomia_excedente_horas)
+    autonomia_acumulada_horas = ( produccion_solar_horas + autonomia_excedente_horas)
 
     # ---------- CORTE PM ----------
     corte_pm_str = "N/A"
@@ -621,7 +621,7 @@ with tab_ind:
                     )
                     a2.metric(label="Autonomía Excedente", value=f"{res_ind['Autonomía Excedente (Horas)']} Horas", delta="Excedente / (carga × 0.90)")
                     a3.metric(label="Tiempo de Respaldo", value=f"{res_ind['Horas de Autonomía']} Horas", delta="Autonomía Batería")
-                    a4.metric(label="Autonomía Acumulada", value=f"{res_ind['Autonomía Acumulada (Horas)']} Horas", delta="80% (Producción + Excedente)")
+                    a4.metric(label="Autonomía Acumulada", value=f"{res_ind['Autonomía Acumulada (Horas)']} Horas", delta=" Producción + Excedente")
                     a5.metric(label="DoD% Potencial", value=res_ind["DoD Potencial"], delta="Descarga objetivo")
 
                     st.markdown("### ⏰ Horarios de Corte Operativo")
