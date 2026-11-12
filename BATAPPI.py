@@ -152,7 +152,7 @@ if archivo_csv is not None:
     st.markdown("### 🔍 Vista Previa del CSV")
     st.dataframe(df_csv[["SITIO_ID", "NOMBRE_SITIO", "CLASIFICACIÓN", "Corte AM", "Corte PM"]], use_container_width=True, hide_index=True)
 
-    total_bursts = 3
+    total_bursts = 5
     delay_seconds = 90
 
     if st.button("🚀 Iniciar Envío Masivo a _iv1 y _iv2 (3 Ráfagas)", type="primary", use_container_width=True):
